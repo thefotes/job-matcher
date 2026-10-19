@@ -1,0 +1,32 @@
+# Environment and secrets
+.venv/
+.env
+.env.*
+!.env.example
+
+# Personal data: profile, history, evaluations and job-board caches
+.job-matcher/
+*.sqlite3
+*.sqlite3-*
+*.db
+
+# Resumes and other personal documents kept next to the checkout
+/*.pdf
+/*.docx
+/*.doc
+/*.txt
+*.webarchive
+
+# Python and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/

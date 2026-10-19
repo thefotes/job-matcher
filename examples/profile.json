@@ -1,0 +1,13 @@
+{
+  "name": "Your Name",
+  "resume_text": "",
+  "target_roles": ["Senior Software Engineer"],
+  "salary_floor": 0,
+  "salary_target": 0,
+  "salary_currency": "USD",
+  "remote_only": true,
+  "location": "City, State, Country",
+  "work_authorization": "",
+  "preferences": [],
+  "dealbreakers": []
+}
