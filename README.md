@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/hero.png" alt="Job Matcher (MCP): your resume plus your preferences gives better job matches" width="100%">
+</p>
+
 # Job Matcher
 
 A local MCP server (and JSON CLI) that gives your AI agent (Claude Code, Claude Desktop,
