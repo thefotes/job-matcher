@@ -6,6 +6,7 @@ Listing therefore stops once a whole page is older than the requested horizon.
 """
 
 from job_matcher.sources.base import Listing, Posting, require, text
+from job_matcher.sources.http import SourceError
 from job_matcher.sources.text import days_ago, html_to_text, infer_remote, relative_days
 
 NAME = "workday"
@@ -50,7 +51,10 @@ def posting(board, item):
 
 def _page(http, board, offset):
     body = {"appliedFacets": {}, "limit": PAGE, "offset": offset, "searchText": ""}
-    return require(http.json(f"{_api(board)}/jobs", body, missing_ok=True), dict)
+    payload = require(http.json(f"{_api(board)}/jobs", body, missing_ok=True), dict)
+    if len(payload.get("jobPostings") or []) > PAGE:
+        raise SourceError("Workday response exceeds the requested page size")
+    return payload
 
 
 def fetch(http, board, horizon_days=None):

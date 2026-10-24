@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -447,6 +448,106 @@ def test_http_retries_rate_limits_then_raises():
     with pytest.raises(SourceError) as raised:
         Http(limited, retries=1, backoff=0).json("https://api.lever.co/v0/postings/x")
     assert raised.value.status == 429 and len(calls) == 2
+
+
+@pytest.mark.parametrize("provider", ["recruitee", "smartrecruiters"])
+def test_matching_low_trust_board_name_requires_explicit_url(discovery, ats, provider):
+    if provider == "recruitee":
+        url = "https://hooli.recruitee.com/api/offers/"
+        ats.routes[url] = {
+            "offers": [
+                {
+                    "id": 1,
+                    "title": "Engineering Manager",
+                    "company_name": "Hooli",
+                    "slug": "engineering-manager",
+                    "description": DESCRIPTION,
+                }
+            ]
+        }
+        careers = "https://hooli.recruitee.com"
+    else:
+        ats.routes[SR.format("hooli") + "?limit=10&offset=0"] = {
+            "totalFound": 1,
+            "content": [{"id": "1", "name": "Engineering Manager", "company": {"name": "Hooli"}}],
+        }
+        careers = "https://careers.smartrecruiters.com/hooli"
+    result = discovery.add_job_board(company="Hooli")
+    assert result["added"] is False
+    assert discovery.list_job_boards()["count"] == 0
+    assert [(c["provider"], c["verified"], c["method"]) for c in result["candidates"]] == [
+        (provider, False, "low-trust-provider")
+    ]
+    confirmed = discovery.add_job_board(company="Hooli", careers_url=careers)
+    assert confirmed["board"]["verified"] is True
+    assert confirmed["board"]["verification_method"] == "careers-url"
+
+
+@pytest.mark.parametrize("provider", ["workday", "smartrecruiters"])
+def test_provider_cannot_exceed_requested_page_size(monkeypatch, provider):
+    module = adapter(provider)
+    monkeypatch.setattr(module, "PAGE", 1)
+    if provider == "workday":
+        board = Board(provider=provider, token="acme", shard="wd5", site="Careers")
+        payload = {
+            "total": 2,
+            "jobPostings": [
+                {"externalPath": f"/job/role_{i}", "title": "Engineering Manager"} for i in range(2)
+            ],
+        }
+        routes = {WD + "/jobs": payload}
+    else:
+        board = Board(provider=provider, token="hooli")
+        routes = {
+            SR.format("hooli") + "?limit=1&offset=0": {
+                "totalFound": 2,
+                "content": [{"id": str(i)} for i in range(2)],
+            }
+        }
+    ats = FakeAts(routes)
+    with pytest.raises(SourceError, match="page size"):
+        module.fetch(Http(ats), board)
+    assert len(ats.calls) == 1
+
+
+@pytest.mark.parametrize("stage", ["listing", "detail"])
+def test_deadline_stops_running_workers_before_more_requests_or_cache_writes(
+    discovery, ats, monkeypatch, stage
+):
+    from job_matcher import discovery as module
+
+    board = discovery.add_job_board("Acme", "https://acme.wd5.myworkdayjobs.com/Careers")["board"]
+    started, release = threading.Event(), threading.Event()
+    futures, calls = [], []
+    original = discovery.discovery.http.transport
+
+    def blocked(method, url, body, headers, timeout):
+        calls.append(url)
+        is_listing = url == WD + "/jobs"
+        if (stage == "listing") == is_listing:
+            started.set()
+            assert release.wait(2), "test must release its dummy transport"
+        return original(method, url, body, headers, timeout)
+
+    def deadline_wait(pending, timeout):
+        futures.extend(pending)
+        assert started.wait(2), "dummy transport must start before simulating the deadline"
+        return set(), set(pending)
+
+    discovery.discovery.http.transport = blocked
+    monkeypatch.setattr(module, "wait", deadline_wait)
+    try:
+        result = discovery.find_jobs(refresh=True, title_keywords=[])
+        assert result["jobs"] == []
+        assert "Timed out" in result["errors"][0]["error"]
+    finally:
+        release.set()
+        for future in futures:
+            future.result(timeout=2)
+    assert len(calls) == (1 if stage == "listing" else 2)
+    assert bool(discovery.store.board_listing(board["id"])) == (stage == "detail")
+    assert discovery.store.board_postings(board["id"], ["acme:Engineering-Manager_R1"], "") == {}
+    assert discovery.store.boards()[0]["not_found_count"] == 0
 
 
 @pytest.fixture

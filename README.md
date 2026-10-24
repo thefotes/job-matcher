@@ -286,11 +286,25 @@ uv run --no-sync job-matcher board-remove 3            # or --company NAME, --de
 A company name is turned into likely board tokens and probed on Greenhouse, Ashby and
 Lever, then SmartRecruiters and Recruitee. A response is not proof of ownership (a guessed
 `capital` board is not Capital One), so a guess is saved only if the token is the exact
-normalized company name on a trusted provider, or the board names itself as that company.
+normalized company name on a trusted provider, or a trusted provider names that company.
 Otherwise the tool returns candidates with board names and sample titles, and the agent asks
 you to confirm one by its careers URL. A careers URL you supply is trusted as your choice;
 a board whose own name differs returns a warning. Workday tenants and custom career domains
 are never guessed. No language model is involved in verification.
+
+SmartRecruiters and Recruitee always require confirmation by careers URL, even when a
+board's displayed company name matches the requested employer. On upgrade, boards previously
+verified only by a low-trust display-name match become inactive until re-added by careers
+URL. Existing URL confirmations and explicit imports retain their recorded verification.
+
+Discovery accepts at most 8 MiB per HTTP response and 16 MiB of downloads per board in a
+run. JSON collections are limited to 10,000 items, with bounds on nesting and total values;
+listing caches are capped at 16 MiB and detail entries at 8 MiB. Responses exceeding a
+provider's requested page size are rejected. The 150-second discovery deadline cancels
+queued work; running workers check cancellation before retries, subsequent requests and
+cache writes. Cancellation is cooperative, so in-flight I/O may finish before the worker
+observes it. Cached employer links pass the same HTTP(S)/hostname validation
+as supplied jobs, and dynamic report text and link destinations are escaped for Markdown.
 
 Imports accept JSON Lines, one board per line, with `company`, `provider` (or `ats`), `token`
 (or `board_token`) and, for Workday, `shard`/`site` (or `workday_shard`/`workday_site`).

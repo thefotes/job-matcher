@@ -5,10 +5,14 @@ and triage never call TypeSafe. Evaluation needs recorded consent and stops at a
 Nothing is marked shown here: the agent does that after showing the jobs.
 """
 
+import html
+import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from job_matcher.discovery import title_key
 from job_matcher.errors import error_message
+from job_matcher.links import is_http_url
 from job_matcher.models import Profile
 from job_matcher.service import job_hash, rescore
 from job_matcher.sources.resolve import same_company
@@ -106,18 +110,23 @@ def _employer_from_boards(job, boards, read, store):
         urls += [
             p["url"]
             for p in listing.get("postings", [])
-            if p.get("url") and title_key(p.get("title")) == key
+            if is_http_url(p.get("url")) and title_key(p.get("title")) == key
         ]
     unique = list(dict.fromkeys(urls))
     return unique[0] if len(unique) == 1 else None
 
 
 def _cell(text):
-    return " ".join(str(text).split()).replace("|", "/")
+    plain = html.escape(" ".join(str(text).split()).replace("|", "/"), quote=False)
+    return re.sub(r"([\\`*_{}\[\]()!#])", r"\\\1", plain)
 
 
 def _link(label, url):
-    return f"[{label}]({url})" if url else ""
+    if not is_http_url(url):
+        return ""
+    # Encode Markdown delimiters before interpolating an otherwise valid web URL.
+    destination = html.escape(quote(url, safe=":/?#@!$&'*+,;=%-._~[]"), quote=True)
+    return f"[{_cell(label)}]({destination})"
 
 
 def _salary(job):
@@ -147,8 +156,8 @@ def _table(jobs):
         notes = "; ".join((job.get("investigate") or []) + (job.get("checks") or []))
         lines.append(
             f"| {_cell(job['company'])} — {_cell(job['title'])} "
-            f"| {job.get('fit_percent', 0):.0f}% | {job.get('salary') or '—'} "
-            f"| {call} | {links or '—'} "
+            f"| {job.get('fit_percent', 0):.0f}% | {_cell(job.get('salary') or '—')} "
+            f"| {_cell(call)} | {links or '—'} "
             f"| {_cell(notes) or '—'} |"
         )
     return lines

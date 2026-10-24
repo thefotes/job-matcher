@@ -3,7 +3,7 @@
 An HTTP 200 for a guessed token is not proof the board belongs to the company: "Capital
 One" guessed as Lever token ``capital`` reaches a different firm. Verification is therefore
 deterministic and conservative. A guess is accepted only when the token is the exact
-normalized company name on a trusted provider, or the board names itself as the company.
+normalized company name on a trusted provider, or a trusted provider names the company.
 Everything else comes back as a candidate for the user to confirm by its careers URL.
 """
 
@@ -110,10 +110,10 @@ def verification(company, board, board_name):
     """(verified, method) for a guessed board. Ported from connections-finder stage 2."""
     compact = normalize_company(company).replace(" ", "")
     hyphen = "-".join(normalize_company(company).split())
-    if same_company(board_name, company):
-        return True, "board-name"
     if low_trust(board.provider):
         return False, "low-trust-provider"
+    if same_company(board_name, company):
+        return True, "board-name"
     if board.token.lower() in {compact, hyphen}:
         return True, "exact-token"
     words = normalize_company(company).split()

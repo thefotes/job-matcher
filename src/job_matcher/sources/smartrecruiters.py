@@ -1,6 +1,7 @@
 """SmartRecruiters lists postings without descriptions; each needs one detail request."""
 
 from job_matcher.sources.base import Listing, Posting, require, text
+from job_matcher.sources.http import SourceError
 from job_matcher.sources.text import html_to_text, infer_remote, iso, join_text, money
 
 NAME = "smartrecruiters"
@@ -42,7 +43,10 @@ def posting(board, item):
 
 def _page(http, board, offset, limit=None):
     url = f"{API.format(token=board.token)}?limit={limit or PAGE}&offset={offset}"
-    return require(http.json(url, missing_ok=True), dict)
+    payload = require(http.json(url, missing_ok=True), dict)
+    if len(payload.get("content") or []) > (limit or PAGE):
+        raise SourceError("SmartRecruiters response exceeds the requested page size")
+    return payload
 
 
 def fetch(http, board, horizon_days=None):
