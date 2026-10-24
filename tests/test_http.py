@@ -115,11 +115,16 @@ def test_cancellation_after_response_prevents_retry():
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize(
-    "body", [b"not JSON", b"[" * 10_000 + b"]" * 10_000], ids=["invalid", "nested"]
-)
-def test_invalid_or_excessively_nested_json_is_a_source_error(monkeypatch, body):
-    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: Response(body))
+@pytest.mark.parametrize("nested", [False, True], ids=["invalid", "nested"])
+def test_invalid_or_excessively_nested_json_is_a_source_error(monkeypatch, nested):
+    # Whether deep nesting overflows depends on the interpreter, so simulate it.
+    if nested:
+
+        def overflow(text):
+            raise RecursionError
+
+        monkeypatch.setattr(module.json, "loads", overflow)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: Response(b"not JSON"))
     with pytest.raises(SourceError, match="not JSON"):
         Http().json("https://example.invalid/jobs")
 
