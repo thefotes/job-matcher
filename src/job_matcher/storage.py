@@ -8,13 +8,6 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from job_matcher.links import is_http_url
-from job_matcher.sources.http import (
-    MAX_BOARD_BYTES,
-    MAX_COLLECTION_ITEMS,
-    MAX_RESPONSE_BYTES,
-    SourceError,
-    bounded_json,
-)
 
 
 def digest(value):
@@ -513,16 +506,12 @@ class Store:
     def board_listing(self, board_id):
         with closing(self.connect()) as db:
             row = db.execute(
-                "SELECT fetched_at, horizon_days, complete, "
-                "CASE WHEN length(CAST(postings AS BLOB))<=? THEN postings END AS postings "
-                "FROM board_listings "
+                "SELECT fetched_at, horizon_days, complete, postings FROM board_listings "
                 "WHERE board_id=?",
-                (MAX_BOARD_BYTES, board_id),
+                (board_id,),
             ).fetchone()
             if not row:
                 return None
-            if row["postings"] is None:
-                raise SourceError("ATS cached listing exceeds the byte limit")
             return {
                 "fetched_at": row["fetched_at"],
                 "horizon_days": row["horizon_days"],
@@ -530,22 +519,14 @@ class Store:
                 "postings": json.loads(row["postings"]),
             }
 
-    def save_board_listing(
-        self, board_id, postings, *, horizon_days, complete, job_count, check=None
-    ):
-        if len(postings) > MAX_COLLECTION_ITEMS:
-            raise SourceError("ATS listing contains too many postings")
-        payload = bounded_json(postings, MAX_BOARD_BYTES, check)
+    def save_board_listing(self, board_id, postings, *, horizon_days, complete, job_count):
         timestamp = now()
         with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            if check is not None:
-                check()
             db.execute(
                 "INSERT INTO board_listings VALUES(?,?,?,?,?) ON CONFLICT(board_id) DO UPDATE "
                 "SET fetched_at=excluded.fetched_at, horizon_days=excluded.horizon_days, "
                 "complete=excluded.complete, postings=excluded.postings",
-                (board_id, timestamp, horizon_days, int(complete), payload),
+                (board_id, timestamp, horizon_days, int(complete), json.dumps(postings)),
             )
             db.execute(
                 "UPDATE boards SET last_fetched_at=?, last_job_count=?, last_error=NULL, "
@@ -554,14 +535,11 @@ class Store:
             )
         return timestamp
 
-    def board_error(self, board_id, error, missing=False, check=None):
+    def board_error(self, board_id, error, missing=False):
         """Record a fetch error. A missing board (HTTP 404/410) counts toward automatic
         retirement: at three consecutive misses the board is deactivated, with the error
         message kept. Returns whether this call deactivated the board."""
         with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            if check is not None:
-                check()
             if not missing:
                 db.execute("UPDATE boards SET last_error=? WHERE id=?", (error, board_id))
                 return False
@@ -582,22 +560,17 @@ class Store:
         with closing(self.connect()) as db:
             rows = db.execute(
                 "SELECT source_id, data FROM board_postings WHERE board_id=? AND fetched_at>=? "
-                "AND length(CAST(data AS BLOB))<=? "
                 f"AND source_id IN ({','.join('?' for _ in source_ids)})",
-                (board_id, fresh_after, MAX_RESPONSE_BYTES, *source_ids),
+                (board_id, fresh_after, *source_ids),
             ).fetchall()
             return {row["source_id"]: json.loads(row["data"]) for row in rows}
 
-    def save_board_posting(self, board_id, source_id, data, check=None):
-        payload = bounded_json(data, MAX_RESPONSE_BYTES, check)
+    def save_board_posting(self, board_id, source_id, data):
         with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            if check is not None:
-                check()
             db.execute(
                 "INSERT INTO board_postings VALUES(?,?,?,?) ON CONFLICT(board_id, source_id) "
                 "DO UPDATE SET fetched_at=excluded.fetched_at, data=excluded.data",
-                (board_id, source_id, now(), payload),
+                (board_id, source_id, now(), json.dumps(data)),
             )
 
     def known(self, jobs):

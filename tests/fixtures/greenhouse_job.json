@@ -1,0 +1,26 @@
+{
+  "id": 1,
+  "internal_job_id": 42,
+  "requisition_id": "ENG-42",
+  "title": "Engineering Manager, Platform",
+  "company_name": "Acme",
+  "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/1",
+  "location": {"name": "Remote, United States"},
+  "content": "<p>Lead our platform team.</p>",
+  "language": "en",
+  "updated_at": "2026-10-24T00:00:00Z",
+  "first_published": null,
+  "departments": [
+    {"id": 10, "name": "Engineering", "child_ids": [], "parent_id": null},
+    {"id": 11, "name": "Platform", "child_ids": [], "parent_id": 10}
+  ],
+  "offices": [
+    {"id": 20, "name": "United States", "location": "Remote", "child_ids": [], "parent_id": null},
+    {"id": 21, "name": "New York", "location": "New York, NY", "child_ids": [], "parent_id": 20}
+  ],
+  "metadata": [
+    {"id": 30, "name": "Employment Type", "value": "Full-time", "value_type": "single_select"},
+    {"id": 31, "name": "Workplace", "value": "Remote", "value_type": "single_select"},
+    {"id": 32, "name": "Salary Range", "value": "$180,000-$240,000", "value_type": "text"}
+  ]
+}
