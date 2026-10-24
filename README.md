@@ -297,10 +297,9 @@ board's displayed company name matches the requested employer. On upgrade, board
 verified only by a low-trust display-name match become inactive until re-added by careers
 URL. Existing URL confirmations and explicit imports retain their recorded verification.
 
-Discovery accepts at most 8 MiB per HTTP response and 16 MiB of downloads per board in a
-run. JSON collections are limited to 10,000 items, with bounds on nesting and total values;
-listing caches are capped at 16 MiB and detail entries at 8 MiB. Responses exceeding a
-provider's requested page size are rejected. The 150-second discovery deadline cancels
+Discovery accepts at most 64 MiB per HTTP response, allowing headroom for large boards
+that include full job descriptions. Responses exceeding a provider's requested page size
+are rejected to keep pagination accurate. The 150-second discovery deadline cancels
 queued work; running workers check cancellation before retries, subsequent requests and
 cache writes. Cancellation is cooperative, so in-flight I/O may finish before the worker
 observes it. Cached employer links pass the same HTTP(S)/hostname validation

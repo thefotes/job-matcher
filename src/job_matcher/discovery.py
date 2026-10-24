@@ -19,7 +19,7 @@ from job_matcher.errors import error_message
 from job_matcher.models import Job
 from job_matcher.sources import PROVIDERS, adapter
 from job_matcher.sources.base import Board, Posting
-from job_matcher.sources.http import MAX_COLLECTION_ITEMS, Http, SourceError
+from job_matcher.sources.http import Http, SourceError
 from job_matcher.sources.resolve import infer_board, same_company, search, summarize
 from job_matcher.sources.text import parse_date
 
@@ -253,31 +253,24 @@ class Discovery:
 
     def _listing(self, row, board, since_days, refresh, http):
         http.check()
-        try:
-            cached = None if refresh else self.store.board_listing(row["id"])
-        except SourceError:
-            cached = None  # Replace an oversized cache left by an older installation.
+        cached = None if refresh else self.store.board_listing(row["id"])
         if (
             cached
             and _age(cached["fetched_at"]) < timedelta(hours=CACHE_HOURS)
             and (cached["complete"] or (cached["horizon_days"] or 0) >= since_days)
         ):
-            if len(cached["postings"]) > MAX_COLLECTION_ITEMS:
-                raise SourceError("ATS listing contains too many postings")
             http.check()
             return [Posting(**p) for p in cached["postings"]], "cached"
         listing = adapter(board.provider).fetch(http, board, since_days)
         http.check()
-        if len(listing.postings) > MAX_COLLECTION_ITEMS:
-            raise SourceError("ATS listing contains too many postings")
         postings = [p.model_dump() | {"detail_ref": p.detail_ref} for p in listing.postings]
+        http.check()
         self.store.save_board_listing(
             row["id"],
             postings,
             horizon_days=since_days,
             complete=listing.complete,
             job_count=listing.total if listing.total is not None else len(postings),
-            check=http.check,
         )
         return listing.postings, "fetched_capped" if listing.capped else "fetched"
 
@@ -308,9 +301,8 @@ class Discovery:
                 http.check()
                 errors.append(f"{stub.title}: {exc}")
                 continue
-            self.store.save_board_posting(
-                row["id"], stub.source_id, full.model_dump(), check=http.check
-            )
+            http.check()
+            self.store.save_board_posting(row["id"], stub.source_id, full.model_dump())
             filled[stub.source_id] = full
         complete = [filled.get(p.source_id, p) if p.description is None else p for p in postings]
         return [p for p in complete if p.description is not None], skipped, errors
@@ -327,9 +319,7 @@ class Discovery:
             message = str(exc) if exc.status != 404 else "Board not found (HTTP 404)"
             if cancelled.is_set() or time.monotonic() >= deadline:
                 return {**report, "status": "error", "error": "Timed out; try again later"}, []
-            if self.store.board_error(
-                row["id"], message, missing=exc.status in {404, 410}, check=http.check_deadline
-            ):
+            if self.store.board_error(row["id"], message, missing=exc.status in {404, 410}):
                 report["deactivated"] = True  # three consecutive misses; kept inactive
             return {**report, "status": "error", "error": message}, []
         cutoff = datetime.now(timezone.utc) - timedelta(days=filters["since_days"])

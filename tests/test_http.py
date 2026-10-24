@@ -1,11 +1,16 @@
 import io
+import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
+from job_matcher.discovery import Discovery
 from job_matcher.sources import http as module
+from job_matcher.sources.base import Board
 from job_matcher.sources.http import Http, SourceError, urllib_transport
+from job_matcher.storage import Store
 
 
 class Response(io.BytesIO):
@@ -23,103 +28,77 @@ class Response(io.BytesIO):
         return data
 
 
-@pytest.mark.parametrize("length", [None, 2])
-def test_transport_bounds_actual_bytes_even_without_reliable_length(monkeypatch, length):
+@pytest.mark.parametrize("length", [None, 2, "invalid"])
+def test_http_bounds_actual_bytes_even_without_reliable_length(monkeypatch, length):
+    monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", 16)
     response = Response(b"x" * 40, length)
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: response)
     with pytest.raises(SourceError, match="byte limit"):
-        urllib_transport("GET", "https://example.invalid/jobs", None, {}, 1, max_bytes=16)
+        Http().json("https://example.invalid/jobs")
     assert response.bytes_read == 17
     assert response.closed
 
 
-def test_transport_rejects_advertised_size_before_reading(monkeypatch):
+def test_http_rejects_advertised_size_before_reading(monkeypatch):
+    monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", 16)
     response = Response(b"x", 100)
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: response)
     with pytest.raises(SourceError, match="byte limit"):
-        urllib_transport("GET", "https://example.invalid/jobs", None, {}, 1, max_bytes=16)
+        Http().json("https://example.invalid/jobs")
     assert response.bytes_read == 0
+    assert response.closed
 
 
-def test_transport_accepts_exact_limit(monkeypatch):
-    response = Response(b"x" * 16, 16)
+def test_http_accepts_exact_limit(monkeypatch):
+    body = b'["123456789012"]'
+    monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", len(body))
+    response = Response(body, len(body))
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: response)
-    assert urllib_transport("GET", "https://example.invalid/jobs", None, {}, 1, max_bytes=16) == (
-        200,
-        "x" * 16,
-    )
-
-
-def test_custom_transport_is_bounded_before_json_parsing(monkeypatch):
-    monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", 16)
-    client = Http(lambda *a: (200, '"' + "x" * 20 + '"'))
-    with pytest.raises(SourceError, match="byte limit"):
-        client.json("https://example.invalid/jobs")
+    assert Http().json("https://example.invalid/jobs") == ["123456789012"]
+    assert response.closed
 
 
 def test_response_limit_counts_utf8_bytes(monkeypatch):
     monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", 16)
-    client = Http(lambda *a: (200, '"' + "é" * 8 + '"'))
+    response = Response(('"' + "é" * 8 + '"').encode())
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: response)
     with pytest.raises(SourceError, match="byte limit"):
-        client.json("https://example.invalid/jobs")
-
-
-def test_board_budget_counts_native_reads_even_on_rejected_responses(monkeypatch):
-    monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", 8)
-    monkeypatch.setattr(module, "MAX_BOARD_BYTES", 12)
-    responses = []
-
-    def open_response(*args, **kwargs):
-        response = Response(b"x" * 40)
-        responses.append(response)
-        return response
-
-    monkeypatch.setattr("urllib.request.urlopen", open_response)
-    root = Http(retries=0)
-    client = root.bounded(time.monotonic() + 1, threading.Event())
-    with pytest.raises(SourceError, match="byte limit"):
-        client.request("GET", "https://example.invalid/jobs")
-    with pytest.raises(SourceError, match="byte limit"):
-        client.request("GET", "https://example.invalid/jobs")
-    with pytest.raises(SourceError, match="byte limit"):
-        client.request("GET", "https://example.invalid/jobs")
-    assert len(responses) == 2
-    assert sum(r.bytes_read for r in responses) == 13
-    assert all(r.closed for r in responses)
-    assert root.bytes_left is None  # Budgets belong to each board/run.
-
-
-def test_exact_board_budget_allows_parsing_but_stops_next_request(monkeypatch):
-    monkeypatch.setattr(module, "MAX_BOARD_BYTES", 2)
-    calls = []
-    root = Http(lambda *a: (calls.append(a) or 200, "[]"))
-    client = root.bounded(time.monotonic() + 1, threading.Event())
-    assert client.json("https://example.invalid/jobs") == []
-    with pytest.raises(SourceError, match="byte limit"):
-        client.json("https://example.invalid/jobs")
-    assert len(calls) == 1
+        Http().json("https://example.invalid/jobs")
+    assert response.bytes_read == 17
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_stopped_run_never_starts_transport(cancel):
-    calls, stop = [], threading.Event()
+def test_stopped_run_never_opens_url(monkeypatch, cancel):
+    def forbidden(*args, **kwargs):
+        pytest.fail("stopped run must not open a URL")
+
+    monkeypatch.setattr("urllib.request.urlopen", forbidden)
+    stop = threading.Event()
     if cancel:
         stop.set()
-    client = Http(lambda *a: (calls.append(a) or 200, "[]")).bounded(
-        time.monotonic() + (1 if cancel else -1), stop
-    )
+    client = Http().bounded(time.monotonic() + (1 if cancel else -1), stop)
     with pytest.raises(SourceError, match="timed out"):
         client.json("https://example.invalid/jobs")
-    assert not calls
 
 
-def test_native_transport_checks_deadline_before_opening_url(monkeypatch):
+def test_native_transport_checks_timeout_before_opening_url(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("expired request must not open a URL")
 
     monkeypatch.setattr("urllib.request.urlopen", forbidden)
     with pytest.raises(SourceError, match="timed out"):
-        urllib_transport("GET", "https://example.invalid/jobs", None, {}, 1, deadline=0)
+        urllib_transport("GET", "https://example.invalid/jobs", None, {}, 0)
+
+
+def test_native_transport_stops_reading_when_timeout_expires(monkeypatch):
+    clock = iter([0, 0, 0, 0, 2])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
+    response = Response(b"[]")
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: response)
+    with pytest.raises(SourceError, match="timed out"):
+        urllib_transport("GET", "https://example.invalid/jobs", None, {}, 1)
+    assert response.bytes_read == 2
+    assert response.closed
 
 
 def test_cancellation_after_response_prevents_retry():
@@ -137,14 +116,62 @@ def test_cancellation_after_response_prevents_retry():
 
 
 @pytest.mark.parametrize(
-    ("body", "constant", "limit"),
-    [
-        ("[1,2,3]", "MAX_COLLECTION_ITEMS", 2),
-        ("[[[[[]]]]]", "MAX_JSON_DEPTH", 3),
-        ("[1,2,3]", "MAX_JSON_VALUES", 3),
-    ],
+    "body", [b"not JSON", b"[" * 10_000 + b"]" * 10_000], ids=["invalid", "nested"]
 )
-def test_json_budgets_are_checked_before_adapter_consumption(monkeypatch, body, constant, limit):
-    monkeypatch.setattr(module, constant, limit)
-    with pytest.raises(SourceError, match="JSON"):
-        Http(lambda *a: (200, body)).json("https://example.invalid/jobs")
+def test_invalid_or_excessively_nested_json_is_a_source_error(monkeypatch, body):
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: Response(body))
+    with pytest.raises(SourceError, match="not JSON"):
+        Http().json("https://example.invalid/jobs")
+
+
+@pytest.mark.parametrize("job_count", [896, 2500])
+def test_large_greenhouse_board_fetches_and_reuses_cache(tmp_path, monkeypatch, job_count):
+    # Synthetic public API shape, with full descriptions and nested metadata. The two
+    # sizes model the reported 896-job regression and a larger board with headroom.
+    job = json.loads((Path(__file__).parent / "fixtures" / "greenhouse_job.json").read_text())
+    paragraph = "Lead engineers building reliable platforms. Collaborate across teams. "
+    job["content"] = "<p>" + paragraph * 160 + "</p>"
+    payload = json.dumps(
+        {
+            "jobs": [
+                job | {"id": i, "absolute_url": f"https://job-boards.greenhouse.io/acme/jobs/{i}"}
+                for i in range(1, job_count + 1)
+            ],
+            "meta": {"total": job_count},
+        }
+    ).encode()
+    assert 8 * 1024 * 1024 < len(payload) < module.MAX_RESPONSE_BYTES
+    if job_count == 2500:
+        assert len(payload) > 16 * 1024 * 1024
+    response, calls = Response(payload, len(payload)), []
+
+    def open_response(request, timeout):
+        calls.append(request.full_url)
+        return response
+
+    monkeypatch.setattr("urllib.request.urlopen", open_response)
+    store = Store(tmp_path)
+    board, _ = store.save_board(
+        Board(provider="greenhouse", token="acme", company="Acme").model_dump(),
+        board_url="https://job-boards.greenhouse.io/acme",
+        board_name="Acme",
+        verified=True,
+        method="careers-url",
+    )
+    discovery = Discovery(store, Http())
+    result = discovery.find_jobs(profile=None, limit=100)
+    assert result["errors"] == []
+    assert len(result["jobs"]) == 100
+    assert result["boards"][0]["postings"] == job_count
+    assert result["boards"][0]["status"] == "fetched"
+    assert response.bytes_read == len(payload)
+    assert response.closed
+    cached = store.board_listing(board["id"])
+    assert len(cached["postings"]) == job_count
+    assert cached["complete"] is True
+    assert paragraph.strip() in cached["postings"][-1]["description"]
+    repeat = discovery.find_jobs(profile=None, limit=100)
+    assert repeat["errors"] == []
+    assert repeat["boards"][0]["status"] == "cached"
+    assert len(repeat["jobs"]) == 100
+    assert calls == ["https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true"]
