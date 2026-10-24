@@ -7,6 +7,8 @@ TypeSafe; evaluation stays a separate, explicit step.
 
 import json
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +19,7 @@ from job_matcher.errors import error_message
 from job_matcher.models import Job
 from job_matcher.sources import PROVIDERS, adapter
 from job_matcher.sources.base import Board, Posting
-from job_matcher.sources.http import Http, SourceError
+from job_matcher.sources.http import MAX_COLLECTION_ITEMS, Http, SourceError
 from job_matcher.sources.resolve import infer_board, same_company, search, summarize
 from job_matcher.sources.text import parse_date
 
@@ -249,15 +251,25 @@ class Discovery:
 
     # ---- discovery ----------------------------------------------------------------
 
-    def _listing(self, row, board, since_days, refresh):
-        cached = None if refresh else self.store.board_listing(row["id"])
+    def _listing(self, row, board, since_days, refresh, http):
+        http.check()
+        try:
+            cached = None if refresh else self.store.board_listing(row["id"])
+        except SourceError:
+            cached = None  # Replace an oversized cache left by an older installation.
         if (
             cached
             and _age(cached["fetched_at"]) < timedelta(hours=CACHE_HOURS)
             and (cached["complete"] or (cached["horizon_days"] or 0) >= since_days)
         ):
+            if len(cached["postings"]) > MAX_COLLECTION_ITEMS:
+                raise SourceError("ATS listing contains too many postings")
+            http.check()
             return [Posting(**p) for p in cached["postings"]], "cached"
-        listing = adapter(board.provider).fetch(self.http, board, since_days)
+        listing = adapter(board.provider).fetch(http, board, since_days)
+        http.check()
+        if len(listing.postings) > MAX_COLLECTION_ITEMS:
+            raise SourceError("ATS listing contains too many postings")
         postings = [p.model_dump() | {"detail_ref": p.detail_ref} for p in listing.postings]
         self.store.save_board_listing(
             row["id"],
@@ -265,10 +277,11 @@ class Discovery:
             horizon_days=since_days,
             complete=listing.complete,
             job_count=listing.total if listing.total is not None else len(postings),
+            check=http.check,
         )
         return listing.postings, "fetched_capped" if listing.capped else "fetched"
 
-    def _details(self, row, board, postings):
+    def _details(self, row, board, postings, http):
         """Fill descriptions for list-only providers, newest first, within a cap."""
         module = adapter(board.provider)
         pending = [p for p in postings if p.description is None]
@@ -282,6 +295,7 @@ class Discovery:
         )
         filled, errors, fetched = {}, [], 0
         for stub in pending:
+            http.check()
             if stub.source_id in cached:
                 filled[stub.source_id] = Posting(**cached[stub.source_id])
                 continue
@@ -289,23 +303,33 @@ class Discovery:
                 continue
             fetched += 1
             try:
-                full = module.detail(self.http, board, stub)
+                full = module.detail(http, board, stub)
             except SourceError as exc:
+                http.check()
                 errors.append(f"{stub.title}: {exc}")
                 continue
-            self.store.save_board_posting(row["id"], stub.source_id, full.model_dump())
+            self.store.save_board_posting(
+                row["id"], stub.source_id, full.model_dump(), check=http.check
+            )
             filled[stub.source_id] = full
         complete = [filled.get(p.source_id, p) if p.description is None else p for p in postings]
         return [p for p in complete if p.description is not None], skipped, errors
 
-    def _board(self, row, filters):
+    def _board(self, row, filters, deadline, cancelled):
+        http = self.http.bounded(deadline, cancelled)
         board = Board(**{k: row[k] for k in ("provider", "token", "shard", "site", "company")})
         report = {"board_id": row["id"], "company": row["company"], "provider": row["provider"]}
         try:
-            postings, origin = self._listing(row, board, filters["since_days"], filters["refresh"])
+            postings, origin = self._listing(
+                row, board, filters["since_days"], filters["refresh"], http
+            )
         except SourceError as exc:
             message = str(exc) if exc.status != 404 else "Board not found (HTTP 404)"
-            if self.store.board_error(row["id"], message, missing=exc.status in {404, 410}):
+            if cancelled.is_set() or time.monotonic() >= deadline:
+                return {**report, "status": "error", "error": "Timed out; try again later"}, []
+            if self.store.board_error(
+                row["id"], message, missing=exc.status in {404, 410}, check=http.check_deadline
+            ):
                 report["deactivated"] = True  # three consecutive misses; kept inactive
             return {**report, "status": "error", "error": message}, []
         cutoff = datetime.now(timezone.utc) - timedelta(days=filters["since_days"])
@@ -315,7 +339,10 @@ class Discovery:
             if title_matches(p.title, filters["title_keywords"])
             and (_timestamp(p) is None or _timestamp(p) >= cutoff)
         ]
-        candidates, skipped, detail_errors = self._details(row, board, candidates)
+        try:
+            candidates, skipped, detail_errors = self._details(row, board, candidates, http)
+        except SourceError as exc:
+            return {**report, "status": "error", "error": str(exc)}, []
         matched = [
             p
             for p in candidates
@@ -331,6 +358,7 @@ class Discovery:
             report["details_deferred"] = skipped
         if detail_errors:
             report["detail_errors"] = detail_errors[:5]
+        http.check()
         return report, matched
 
     def find_jobs(
@@ -374,9 +402,15 @@ class Discovery:
                 "import_job_boards first.",
             }
         pool = ThreadPoolExecutor(BOARD_WORKERS)
-        futures = {pool.submit(self._board, row, filters): row for row in rows}
-        done, pending = wait(futures, timeout=DEADLINE_SECONDS)
-        pool.shutdown(wait=False, cancel_futures=True)
+        deadline, cancelled = time.monotonic() + DEADLINE_SECONDS, threading.Event()
+        try:
+            futures = {
+                pool.submit(self._board, row, filters, deadline, cancelled): row for row in rows
+            }
+            done, pending = wait(futures, timeout=max(0, deadline - time.monotonic()))
+        finally:
+            cancelled.set()
+            pool.shutdown(wait=False, cancel_futures=True)
         reports, postings = [], []
         for future, row in futures.items():
             if future in pending:
@@ -392,6 +426,17 @@ class Discovery:
                 continue
             try:
                 report, matched = future.result()
+            except SourceError as exc:
+                report, matched = (
+                    {
+                        "board_id": row["id"],
+                        "company": row["company"],
+                        "provider": row["provider"],
+                        "status": "error",
+                        "error": str(exc),
+                    },
+                    [],
+                )
             except Exception as exc:  # one malformed board must not sink the others
                 report, matched = (
                     {

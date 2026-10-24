@@ -3,6 +3,8 @@ from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from job_matcher.links import is_http_url
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
@@ -220,16 +222,16 @@ class Job(StrictModel):
 
     @model_validator(mode="after")
     def apply_link(self):
-        if self.apply_url and not self.apply_url.startswith(("https://", "http://")):
-            raise ValueError("apply_url must be an HTTP or HTTPS URL")
+        if self.apply_url and not is_http_url(self.apply_url):
+            raise ValueError("apply_url must be an HTTP or HTTPS URL with a hostname")
         return self
 
     @model_validator(mode="after")
     def source_pair(self):
         if self.source_id and not self.source:
             raise ValueError("source is required with source_id")
-        if self.url and not self.url.startswith(("https://", "http://")):
-            raise ValueError("url must be an HTTP or HTTPS URL")
+        if self.url and not is_http_url(self.url):
+            raise ValueError("url must be an HTTP or HTTPS URL with a hostname")
         return self
 
 

@@ -382,6 +382,26 @@ def test_employer_links_filled_from_boards_already_read(service, ats):
     assert rows[ambiguous["job_id"]]["url"] == "https://www.linkedin.com/jobs/view/882/"
 
 
+@pytest.mark.parametrize(
+    "url", ["javascript:window.audit=1", "data:text/html,test", "https:///missing-host"]
+)
+def test_cached_employer_links_are_validated_before_enrichment(service, ats, url):
+    service.record_consent(True)
+    single = service.evaluate(linkedin_job("Director of Engineering", "Acme", 881))
+    payload = greenhouse_payload()
+    old = next(job for job in payload["jobs"] if job["id"] == 13)
+    old.update(absolute_url=url, content="", first_published=ago(40), updated_at=ago(40))
+    ats.routes[GH.format("acme") + "?content=true"] = {"jobs": [old]}
+    calls = service.provider.calls
+    result = service.daily_run(max_new_evaluations=0, refresh=True)
+    shown = next(job for job in listed(result) if job["job_id"] == single["job_id"])
+    assert shown.get("employer_url") is None
+    stored = next(r for r in service.store.history(100) if r["job_id"] == single["job_id"])
+    assert stored["job"]["apply_url"] is None
+    assert url not in result["report_markdown"]
+    assert service.provider.calls == calls
+
+
 def test_stops_evaluating_after_repeated_provider_failures(service, monkeypatch):
     from job_matcher import daily
 
